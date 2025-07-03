@@ -46,8 +46,9 @@ def main():
     with open(output_file, "w") as f:
         f.write(encoded)
 
-    print(f"\n✅ ترکیب با موفقیت انجام شد. فایل خروجی: {output_file}")
-    print("📎 می‌تونی این فایل رو به کلاینت‌هات بدی یا روی سرور آپلود کنی.")
+    print(f"\n✅ ترکیب با موفقیت انجام شد.")
+    print(f"📄 فایل خروجی: {output_file}")
+    print(f"\n📎 لینک ترکیبی (Base64):\n\n{encoded[:100]}... [بقیه در فایل ذخیره شده]")
 
 if __name__ == "__main__":
     main()
