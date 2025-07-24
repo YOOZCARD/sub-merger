@@ -61,14 +61,27 @@ check_and_install_deps
 # Get X-ui Panel details from user
 echo ""
 echo "Please enter your X-ui Panel details:"
-read -p "X-ui Panel URL (e.g., http://127.0.0.1:54321): " XUI_PANEL_URL
+read -p "X-ui Panel Base URL (e.g., http://127.0.0.1:54321): " XUI_PANEL_BASE_URL
+read -p "X-ui Panel Path URI (e.g., /admin/ or leave empty if none): " XUI_PANEL_PATH_URI
 read -p "X-ui Username: " XUI_USERNAME
 read -s -p "X-ui Password: " XUI_PASSWORD # -s for silent input (password)
 echo "" # New line after password input for better formatting
 
-# Basic validation for URL
-if [[ ! "$XUI_PANEL_URL" =~ ^https?:// ]]; then
-    echo "Error: Invalid X-ui Panel URL format. It should start with http:// or https://."
+# Validate and format XUI_PANEL_PATH_URI
+# Ensure it starts and ends with a slash if not empty
+if [ -n "$XUI_PANEL_PATH_URI" ]; then
+    # Add leading slash if missing
+    [[ "$XUI_PANEL_PATH_URI" != /* ]] && XUI_PANEL_PATH_URI="/$XUI_PANEL_PATH_URI"
+    # Add trailing slash if missing
+    [[ "$XUI_PANEL_PATH_URI" != */ ]] && XUI_PANEL_PATH_URI="${XUI_PANEL_PATH_URI}/"
+fi
+
+# Construct the full X-ui Panel URL
+XUI_PANEL_URL="${XUI_PANEL_BASE_URL}${XUI_PANEL_PATH_URI}"
+
+# Basic validation for Base URL
+if [[ ! "$XUI_PANEL_BASE_URL" =~ ^https?:// ]]; then
+    echo "Error: Invalid X-ui Panel Base URL format. It should start with http:// or https://."
     exit 1
 fi
 
@@ -78,12 +91,12 @@ echo "Connecting to X-ui panel at $XUI_PANEL_URL..."
 TOKEN_RESPONSE=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$XUI_USERNAME\",\"password\":\"$XUI_PASSWORD\"}" \
-  "$XUI_PANEL_URL/login")
+  "${XUI_PANEL_URL}login") # Append /login to the constructed URL
 
 TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.obj.token // empty') # Use jq for robust parsing
 
 if [ -z "$TOKEN" ]; then
-  echo "Error: Could not obtain X-ui token. Check your username, password, and panel URL."
+  echo "Error: Could not obtain X-ui token. Check your username, password, and panel URL/path."
   echo "Response from panel: $TOKEN_RESPONSE"
   exit 1
 fi
@@ -93,7 +106,7 @@ echo "Successfully obtained X-ui token."
 # 2. Get all inbounds
 INBOUNDS_RESPONSE=$(curl -s -X GET \
   -H "Cookie: token=$TOKEN" \
-  "$XUI_PANEL_URL/panel/api/inbounds/all")
+  "${XUI_PANEL_URL}panel/api/inbounds/all") # Append /panel/api/inbounds/all
 
 # Check for API response success
 if ! echo "$INBOUNDS_RESPONSE" | jq -e '.success == true' > /dev/null; then
@@ -173,7 +186,7 @@ echo "$INBOUNDS_DATA" | while read -r inbound; do
         -H "Content-Type: application/json" \
         -H "Cookie: token=$TOKEN" \
         -d "{\"id\":$INBOUND_ID,\"remark\":\"$TAG\",\"total\":$TARGET_TRAFFIC}" \
-        "$XUI_PANEL_URL/panel/api/inbounds/update")
+        "${XUI_PANEL_URL}panel/api/inbounds/update") # Append /panel/api/inbounds/update
 
       if echo "$UPDATE_RESPONSE" | jq -e '.success == true' > /dev/null; then
         echo "    Successfully updated inbound ID: $INBOUND_ID"
