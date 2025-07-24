@@ -1,102 +1,192 @@
 #!/bin/bash
 
-# --- اسکریپت نصب و اجرای تعاملی از گیت‌هاب ---
+# --- DO NOT EDIT BELOW THIS LINE UNLESS YOU KNOW WHAT YOU ARE DOING ---
 
-# توابع و متغیرها
-# --------------------------------------------------
-# رنگ‌ها برای خروجی بهتر
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+echo "Starting X-ui Traffic Sync Script..."
 
-# تابع نمایش پیام
-function print_message() {
-    echo -e "${GREEN}---> $1${NC}"
-}
+# Function to check and install dependencies
+check_and_install_deps() {
+    echo "Checking for required dependencies..."
+    local deps=("curl" "jq")
+    local missing_deps=()
 
-# تابع نمایش پیام مهم
-function print_important() {
-    echo -e "${YELLOW}*** $1 ***${NC}"
-}
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing_deps+=("$dep")
+        fi
+    done
 
-# بخش اصلی اسکریپت
-# --------------------------------------------------
-
-# ۱. نصب پیش‌نیازها
-print_message "Updating package lists and installing prerequisites (python3, pip, curl)..."
-sudo apt-get update > /dev/null 2>&1
-sudo apt-get install -y python3 python3-pip curl > /dev/null 2>&1
-print_message "Installing required Python libraries (Flask, Requests)..."
-pip3 install flask requests > /dev/null 2>&1
-
-# ۲. دریافت لینک‌های سابسکریپشن از کاربر
-print_message "Please enter your subscription links."
-print_important "Enter one link per line. Press ENTER on an empty line to finish."
-
-links=()
-while true; do
-    read -p "Subscription Link: " link
-    if [ -z "$link" ]; then
-        break
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        echo "All dependencies are installed."
+        return 0
     fi
-    links+=("\"$link\"")
-done
 
-# تبدیل آرایه bash به لیست پایتون
-IFS=,
-python_links="${links[*]}"
+    echo "Missing dependencies: ${missing_deps[*]}"
+    echo "Attempting to install missing dependencies..."
 
-if [ -z "$python_links" ]; then
-    echo -e "${RED}Error: No subscription links were entered. Aborting.${NC}"
+    if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu
+        sudo apt update
+        for dep in "${missing_deps[@]}"; do
+            echo "Installing $dep..."
+            sudo apt install -y "$dep"
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to install $dep using apt. Please install it manually (sudo apt install -y $dep) and try again."
+                exit 1
+            fi
+        done
+    elif [ -f /etc/redhat-release ]; then
+        # CentOS/RHEL/Fedora
+        sudo yum check-update
+        for dep in "${missing_deps[@]}"; do
+            echo "Installing $dep..."
+            sudo yum install -y "$dep"
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to install $dep using yum. Please install it manually (sudo yum install -y $dep) and try again."
+                exit 1
+            fi
+        done
+    else
+        echo "Warning: Unsupported operating system for automatic dependency installation."
+        echo "Please install 'curl' and 'jq' manually and re-run the script."
+        exit 1
+    fi
+
+    echo "Dependencies installed successfully."
+}
+
+# Run dependency check
+check_and_install_deps
+
+# Get X-ui Panel details from user
+echo ""
+echo "Please enter your X-ui Panel details:"
+read -p "X-ui Panel URL (e.g., http://127.0.0.1:54321): " XUI_PANEL_URL
+read -p "X-ui Username: " XUI_USERNAME
+read -s -p "X-ui Password: " XUI_PASSWORD # -s for silent input (password)
+echo "" # New line after password input for better formatting
+
+# Basic validation for URL
+if [[ ! "$XUI_PANEL_URL" =~ ^https?:// ]]; then
+    echo "Error: Invalid X-ui Panel URL format. It should start with http:// or https://."
     exit 1
 fi
 
+echo "Connecting to X-ui panel at $XUI_PANEL_URL..."
 
-# ۳. ساخت فایل پایتون در سرور
-print_message "Generating the Python application file (app.py)..."
-cat <<EOF > app.py
-import requests
-from flask import Flask, Response
-import base64
+# 1. Get X-ui token
+TOKEN_RESPONSE=$(curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"$XUI_USERNAME\",\"password\":\"$XUI_PASSWORD\"}" \
+  "$XUI_PANEL_URL/login")
 
-app = Flask(__name__)
+TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.obj.token // empty') # Use jq for robust parsing
 
-SUBSCRIPTION_LINKS = [$python_links]
-PORT = 8080
+if [ -z "$TOKEN" ]; then
+  echo "Error: Could not obtain X-ui token. Check your username, password, and panel URL."
+  echo "Response from panel: $TOKEN_RESPONSE"
+  exit 1
+fi
 
-def fetch_and_decode_configs(url):
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, timeout=10, headers=headers)
-        response.raise_for_status()
-        return base64.b64decode(response.content).decode('utf-8').strip().split('\n')
-    except Exception:
-        return []
+echo "Successfully obtained X-ui token."
 
-@app.route('/sub')
-def combined_subscription():
-    all_configs = []
-    for link in SUBSCRIPTION_LINKS:
-        all_configs.extend(fetch_and_decode_configs(link))
-    
-    combined_content = "\n".join(all_configs)
-    return Response(base64.b64encode(combined_content.encode('utf-8')), mimetype='text/plain')
+# 2. Get all inbounds
+INBOUNDS_RESPONSE=$(curl -s -X GET \
+  -H "Cookie: token=$TOKEN" \
+  "$XUI_PANEL_URL/panel/api/inbounds/all")
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=PORT)
-EOF
+# Check for API response success
+if ! echo "$INBOUNDS_RESPONSE" | jq -e '.success == true' > /dev/null; then
+  echo "Error: Failed to retrieve inbounds data from X-ui panel."
+  echo "Response from panel: $INBOUNDS_RESPONSE"
+  exit 1
+fi
 
-# ۴. اجرای برنامه در پس‌زمینه
-print_message "Starting the subscription service in the background..."
-# اجرای برنامه با nohup تا بعد از بستن ترمینال هم فعال بماند
-nohup python3 app.py > /dev/null 2>&1 &
+INBOUNDS_DATA=$(echo "$INBOUNDS_RESPONSE" | jq -c '.obj[]')
 
-# ۵. پیدا کردن IP سرور و نمایش لینک نهایی
-SERVER_IP=$(curl -s ifconfig.me)
-print_message "Setup is complete!"
-echo "------------------------------------------------------------------"
-print_important "Your new combined subscription link is ready:"
-echo -e "${CYAN}http://$SERVER_IP:8080/sub${NC}"
-echo "------------------------------------------------------------------"
-echo "The service is running in the background. You can now close this terminal."
+if [ -z "$INBOUNDS_DATA" ]; then
+  echo "No inbounds found or an issue occurred while parsing inbounds data."
+  echo "Response from panel: $INBOUNDS_RESPONSE"
+  exit 1
+fi
+
+echo "Successfully retrieved inbounds data."
+
+# 3. Process inbounds to group by subscription_id and update traffic
+declare -A subscription_id_traffic # Dictionary to store traffic for each subscription_id
+
+# First pass: Determine the target traffic for each subscription_id
+echo "Determining target traffic for each subscription ID..."
+echo "$INBOUNDS_DATA" | while read -r inbound; do
+  SETTINGS=$(echo "$inbound" | jq -r '.settings')
+  TOTAL_TRAFFIC=$(echo "$inbound" | jq -r '.total') # Get total traffic in bytes
+
+  # Parse clientMails to find subscription_id
+  SUBSCRIPTION_ID=""
+  # Safely check if 'clients' array exists and iterate
+  if echo "$SETTINGS" | jq -e '.clients | length > 0' > /dev/null; then
+    CLIENTS_ARRAY=$(echo "$SETTINGS" | jq -c '.clients[]')
+    echo "$CLIENTS_ARRAY" | while read -r client; do
+      if echo "$client" | jq -e 'has("subscriptionId")' > /dev/null; then
+        SUBSCRIPTION_ID=$(echo "$client" | jq -r '.subscriptionId')
+        break # Found subscriptionId, no need to check other clients for this inbound
+      fi
+    done
+  fi
+
+  if [ -n "$SUBSCRIPTION_ID" ]; then
+    if [ -z "${subscription_id_traffic[$SUBSCRIPTION_ID]}" ]; then
+      # First time seeing this subscription_id, set its target traffic
+      subscription_id_traffic[$SUBSCRIPTION_ID]=$TOTAL_TRAFFIC
+      echo "  Subscription ID: $SUBSCRIPTION_ID - Target Traffic: $(($TOTAL_TRAFFIC / 1024 / 1024)) MB" # Convert bytes to MB for display
+    fi
+  fi
+done
+
+# Second pass: Update total traffic for all inbounds with the same subscription_id
+echo "Updating inbounds based on determined target traffic..."
+echo "$INBOUNDS_DATA" | while read -r inbound; do
+  INBOUND_ID=$(echo "$inbound" | jq -r '.id')
+  TAG=$(echo "$inbound" | jq -r '.remark')
+  CURRENT_TOTAL_TRAFFIC=$(echo "$inbound" | jq -r '.total')
+  SETTINGS=$(echo "$inbound" | jq -r '.settings')
+
+  SUBSCRIPTION_ID=""
+  if echo "$SETTINGS" | jq -e '.clients | length > 0' > /dev/null; then
+    CLIENTS_ARRAY=$(echo "$SETTINGS" | jq -c '.clients[]')
+    echo "$CLIENTS_ARRAY" | while read -r client; do
+      if echo "$client" | jq -e 'has("subscriptionId")' > /dev/null; then
+        SUBSCRIPTION_ID=$(echo "$client" | jq -r '.subscriptionId')
+        break
+      fi
+    done
+  fi
+
+  if [ -n "$SUBSCRIPTION_ID" ] && [ -n "${subscription_id_traffic[$SUBSCRIPTION_ID]}" ]; then
+    TARGET_TRAFFIC=${subscription_id_traffic[$SUBSCRIPTION_ID]}
+
+    if [ "$CURRENT_TOTAL_TRAFFIC" -ne "$TARGET_TRAFFIC" ]; then
+      echo "  Updating inbound ID: $INBOUND_ID (Tag: $TAG, Subscription ID: $SUBSCRIPTION_ID)"
+      echo "    Current Traffic: $(($CURRENT_TOTAL_TRAFFIC / 1024 / 1024)) MB, Target Traffic: $(($TARGET_TRAFFIC / 1024 / 1024)) MB"
+
+      UPDATE_RESPONSE=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -H "Cookie: token=$TOKEN" \
+        -d "{\"id\":$INBOUND_ID,\"remark\":\"$TAG\",\"total\":$TARGET_TRAFFIC}" \
+        "$XUI_PANEL_URL/panel/api/inbounds/update")
+
+      if echo "$UPDATE_RESPONSE" | jq -e '.success == true' > /dev/null; then
+        echo "    Successfully updated inbound ID: $INBOUND_ID"
+      else
+        echo "    Failed to update inbound ID: $INBOUND_ID"
+        echo "    Response: $UPDATE_RESPONSE"
+      fi
+    else
+      echo "  Inbound ID: $INBOUND_ID (Tag: $TAG, Subscription ID: $SUBSCRIPTION_ID) already has target traffic. No update needed."
+    fi
+  elif [ -z "$SUBSCRIPTION_ID" ]; then
+    echo "  Inbound ID: $INBOUND_ID (Tag: $TAG) has no subscription_id. Skipping."
+  fi
+done < <(echo "$INBOUNDS_DATA") # Use process substitution for the second loop
+
+echo "Script finished."
