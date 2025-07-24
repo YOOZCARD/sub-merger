@@ -88,25 +88,44 @@ fi
 echo "Connecting to X-ui panel at $XUI_PANEL_URL..."
 
 # 1. Get X-ui token
-TOKEN_RESPONSE=$(curl -s -X POST \
+# Use -c /tmp/cookies.txt to save cookies and -D - to show headers (for debugging)
+LOGIN_OUTPUT=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$XUI_USERNAME\",\"password\":\"$XUI_PASSWORD\"}" \
-  "${XUI_PANEL_URL}login") # Append /login to the constructed URL
+  -c /tmp/xui_cookies.txt -D - \
+  "${XUI_PANEL_URL}login")
 
-TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.obj.token // empty') # Use jq for robust parsing
+TOKEN_RESPONSE=$(echo "$LOGIN_OUTPUT" | grep -v '^<') # Filter out headers to get only JSON response
+HEADERS=$(echo "$LOGIN_OUTPUT" | grep '^<') # Filter out JSON to get only headers
+
+# Try to get token from JSON response first
+TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.obj.token // empty')
+
+# If token is not found in JSON, try to get it from cookies
+if [ -z "$TOKEN" ]; then
+    echo "Token not found in JSON response. Checking cookies..."
+    # Extract token from Set-Cookie header if present
+    TOKEN=$(echo "$HEADERS" | grep -i "Set-Cookie: token=" | sed -n 's/.*token=\([^;]*\);.*/\1/p')
+    if [ -n "$TOKEN" ]; then
+        echo "Token successfully extracted from Set-Cookie header."
+    fi
+fi
 
 if [ -z "$TOKEN" ]; then
   echo "Error: Could not obtain X-ui token. Check your username, password, and panel URL/path."
-  echo "Response from panel: $TOKEN_RESPONSE"
+  echo "Response from panel (JSON): $TOKEN_RESPONSE"
+  echo "Response from panel (Headers): $HEADERS"
   exit 1
 fi
 
 echo "Successfully obtained X-ui token."
 
 # 2. Get all inbounds
+# Use -b /tmp/xui_cookies.txt to send cookies with the request
 INBOUNDS_RESPONSE=$(curl -s -X GET \
   -H "Cookie: token=$TOKEN" \
-  "${XUI_PANEL_URL}panel/api/inbounds/all") # Append /panel/api/inbounds/all
+  -b /tmp/xui_cookies.txt \
+  "${XUI_PANEL_URL}panel/api/inbounds/all")
 
 # Check for API response success
 if ! echo "$INBOUNDS_RESPONSE" | jq -e '.success == true' > /dev/null; then
@@ -185,8 +204,9 @@ echo "$INBOUNDS_DATA" | while read -r inbound; do
       UPDATE_RESPONSE=$(curl -s -X POST \
         -H "Content-Type: application/json" \
         -H "Cookie: token=$TOKEN" \
+        -b /tmp/xui_cookies.txt \
         -d "{\"id\":$INBOUND_ID,\"remark\":\"$TAG\",\"total\":$TARGET_TRAFFIC}" \
-        "${XUI_PANEL_URL}panel/api/inbounds/update") # Append /panel/api/inbounds/update
+        "${XUI_PANEL_URL}panel/api/inbounds/update")
 
       if echo "$UPDATE_RESPONSE" | jq -e '.success == true' > /dev/null; then
         echo "    Successfully updated inbound ID: $INBOUND_ID"
@@ -201,5 +221,8 @@ echo "$INBOUNDS_DATA" | while read -r inbound; do
     echo "  Inbound ID: $INBOUND_ID (Tag: $TAG) has no subscription_id. Skipping."
   fi
 done < <(echo "$INBOUNDS_DATA") # Use process substitution for the second loop
+
+# Clean up temporary cookie file
+rm -f /tmp/xui_cookies.txt
 
 echo "Script finished."
